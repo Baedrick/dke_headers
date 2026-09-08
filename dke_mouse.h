@@ -3,7 +3,7 @@
 
 // TODO(Dedrick): Move elsewhere
 #ifndef DKE_MOUSE_QUEUE_CAPACITY
-#	define DKE_MOUSE_QUEUE_CAPACITY 32
+#	define DKE_MOUSE_QUEUE_CAPACITY 16
 #endif
 
 ////////////////////////////////////////////////////////////
@@ -50,18 +50,6 @@ extern "C" {
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Memory Primitives
 
-typedef struct DKE_Mouse_Arena {
-	DKE_U8 *memory;
-	DKE_U32 size;
-	DKE_U32 pos;
-} DKE_Mouse_Arena;
-StaticAssert(sizeof(DKE_Mouse_Arena) <= DKE_ARENA_HEADER_SIZE(32)); // TODO(Dedrick)
-
-typedef struct DKE_Mouse_TempArena {
-	DKE_Mouse_Arena *arena;
-	DKE_U32 pos;
-} DKE_Mouse_TempArena;
-
 typedef struct DKE_Mouse_Ring {
 	DKE_U8 *memory;
 	DKE_U32 size;
@@ -102,22 +90,16 @@ typedef struct DKE_Mouse_Report {
 } DKE_Mouse_Report;
 
 typedef struct DKE_Mouse_Context {
-	DKE_Mouse_Arena *arena;
 	DKE_Mouse_Ring ring;
+	DKE_Mouse_Config cfg;
+	DKE_Mouse_ButtonFlags buttons_state;
+	DKE_S32 x_offset;
+	DKE_S32 y_offset;
+	DKE_S32 x_wheel;
+	DKE_S32 y_wheel;
+	DKE_S32 x_pan;
+	DKE_S32 y_pan;
 } DKE_Mouse_Context;
-
-////////////////////////////////////////////////////////////
-//~ Dedrick: Mouse API
-
-DKE_U32 dke_mouse_hid_descriptor_size_from_config(DKE_Mouse_Config const *cfg);
-void dke_mouse_hid_descriptor_fill(DKE_Mouse_Config const *cfg, DKE_U8 *dst, DKE_U32 size);
-
-DKE_U32 dke_mouse_min_memory_size(void);
-
-
-void dke_mouse_push_move(DKE_Mouse_Context *m, DKE_S32 x_offset, DKE_S32 y_offset, DKE_S32 x_offset, DKE_S32 y_offset);
-void dke_mouse_push_button_down(DKE_Mouse_Context *m, DKE_Mouse_ButtonFlags flags);
-void dke_mouse_push_button_up(DKE_Mouse_Context *m, DKE_Mouse_ButtonFlags flags);
 
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Basic Helpers
@@ -130,14 +112,32 @@ void *dke_mouse_memset_fallback(void *dst, DKE_U8 c, DKE_U32 size);
 void *dke_mouse_memcpy_fallback(void *dst, void const *src, DKE_U32 size);
 #endif
 
-DKE_Mouse_TempArena dke_mouse_scratch_begin();
-void dke_mouse_scratch_end(DKE_Mouse_TempArena scratch);
-
+//~ Dedrick: Memory Primitives
 DKE_Mouse_Ring dke_mouse_ring_make(void *memory, DKE_U32 size);
-DKE_U32 dke_mouse_ring_write(DKE_Mouse_Ring *ring, void const *src, DKE_U32 size);
-DKE_U32 dke_mouse_ring_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size);
-#define dke_mouse_ring_write_struct(ring, ptr) dke_mouse_ring_write((ring), (ptr), sizeof(*(ptr)))
-#define dke_mouse_ring_read_struct(ring, ptr) dke_mouse_ring_read((ring), (ptr), sizeof(*(ptr)))
+DKE_B32 dke_mouse_ring_try_write(DKE_Mouse_Ring *ring, void const *src, DKE_U32 size);
+DKE_B32 dke_mouse_ring_try_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size);
+#define dke_mouse_ring_try_write_struct(ring, ptr) dke_mouse_ring_try_write((ring), (ptr), sizeof(*(ptr)))
+#define dke_mouse_ring_try_read_struct(ring, ptr) dke_mouse_ring_try_read((ring), (ptr), sizeof(*(ptr)))
+
+////////////////////////////////////////////////////////////
+//~ Dedrick: Mouse API
+
+DKE_U32 dke_mouse_hid_descriptor_size_from_config(DKE_Mouse_Config const *cfg);
+void dke_mouse_hid_descriptor_fill(DKE_Mouse_Config const *cfg, DKE_U8 *dst, DKE_U32 size);
+
+// TODO(Dedrick): The initialization needs to be better, user needs hint to provide a nice default to memory size.
+void dke_mouse_init(DKE_Mouse_Context *m, DKE_Mouse_Config const *cgf, void *ring_memory, DKE_U32 ring_size);
+// dke_mouse_context_alloc
+// dke_mouse_context_select
+// extern DKE_Mouse_Context *
+
+void dke_mouse_push_move(DKE_Mouse_Context *m, DKE_S32 x_offset, DKE_S32 y_offset);
+void dke_mouse_push_scroll(DKE_Mouse_Context *m, DKE_S32 x_wheel, DKE_S32 y_wheel);
+void dke_mouse_push_pan(DKE_Mouse_Context *m, DKE_S32 x_pan, DKE_S32 y_pan);
+void dke_mouse_push_button_down(DKE_Mouse_Context *m, DKE_Mouse_ButtonFlags flags);
+void dke_mouse_push_button_up(DKE_Mouse_Context *m, DKE_Mouse_ButtonFlags flags);
+
+B32 dke_mouse_pop_report(DKE_Mouse_Context *m, DKE_Mouse_Report *out_report);
 
 #ifdef __cplusplus
 }
@@ -147,8 +147,7 @@ DKE_U32 dke_mouse_ring_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size);
 
 #ifdef DKE_MOUSE_IMPLEMENTATION
 
-#define dke__mouse_array_count(arr) (sizeof(a) / sizeof((a)[0]))
-#define dke__mouse_align_pow2(x, a) (((x) + (a) - 1) & ~((a) - 1))
+#define dke__mouse_assert(x) (void)(x)
 
 static const DKE_U8 dke__mouse_hid_prefix_descriptor[] = {
 	0x05, 0x01,        // Usage Page (Generic Desktop)
@@ -208,24 +207,6 @@ static const DKE_U8 dke__mouse_hid_suffix_descriptor[] = {
 	0xC0,              // End Collection (Application)
 };
 
-#if !defined(DKE_MOUSE_MEMSET_OVERRIDE)
-void *dke_mouse_memset_fallback(void *dst, DKE_U8 c, DKE_U32 size) {
-	for (DKE_U32 idx = 0; idx < size; ++idx) {
-		((DKE_U8 *)dst)[idx] = c;
-	}
-	return dst;
-}
-#endif
-
-#if !defined(DKE_MOUSE_MEMCPY_OVERRIDE)
-void *dke_mouse_memcpy_fallback(void *dst, void const *src, DKE_U32 size) {
-	for (DKE_U32 idx = 0; idx < size; ++idx) {
-		((DKE_U8 *)dst)[idx] = ((DKE_U8 *)src)[idx];
-	}
-	return dst;
-}
-#endif
-
 DKE_U32 dke_mouse_hid_descriptor_size_from_config(DKE_Mouse_Config const *cfg) {
 	DKE_U8 const num_padding_bits = (8 - (cfg->num_buttons % 8)) % 8;
 	DKE_U32 const hid_button_descriptor_size = 16 + (num_padding_bits > 0 ? 6 : 0);
@@ -243,7 +224,7 @@ DKE_U32 dke_mouse_hid_descriptor_size_from_config(DKE_Mouse_Config const *cfg) {
 }
 
 void dke_mouse_hid_descriptor_fill(DKE_Mouse_Config const *cfg, DKE_U8 *dst, DKE_U32 size) {
-	dke_mouse_assert(dke_mouse_hid_descriptor_size_from_config(cfg) <= size);
+	dke__mouse_assert(dke_mouse_hid_descriptor_size_from_config(cfg) <= size);
 	DKE_U32 cursor = 0;
 
 	//~ Dedrick: Fill prefix.
@@ -290,10 +271,66 @@ void dke_mouse_hid_descriptor_fill(DKE_Mouse_Config const *cfg, DKE_U8 *dst, DKE
 	}
 }
 
-DKE_U32 dke_mouse_min_memory_size(void) {
-	// TODO(Dedrick): Alloc
-	return 0;
+void dke_mouse_init(DKE_Mouse_Context *m, DKE_Mouse_Config const *cgf, void *ring_memory, DKE_U32 ring_size) {
+	dke_mouse_memset(m, 0, sizeof(DKE_Mouse_Context));
+	m->cfg = *cgf;
+	m->ring = dke_mouse_ring_make(ring_memory, ring_size);
 }
+
+void dke_mouse_push_move(DKE_Mouse_Context *m, DKE_S32 x_offset, DKE_S32 y_offset) {
+	m->x_offset = x_offset;
+	m->y_offset = y_offset;
+}
+
+void dke_mouse_push_scroll(DKE_Mouse_Context *m, DKE_S32 x_wheel, DKE_S32 y_wheel) {
+	m->x_wheel = x_wheel;
+	m->y_wheel = y_wheel;
+}
+
+void dke_mouse_push_pan(DKE_Mouse_Context *m, DKE_S32 x_pan, DKE_S32 y_pan) {
+	m->x_pan = x_pan;
+	m->y_pan = y_pan;
+}
+
+void dke_mouse_push_button_down(DKE_Mouse_Context *m, DKE_Mouse_ButtonFlags flags) {
+	//~ Dedrick: Push accumulated motion so the click happens after.
+	if (m->x_offset != 0 || m->y_offset != 0 || ...) {
+
+	}
+
+	//~ Dedrick: Push the click.
+	m->buttons_state |= flags;
+	dke_mouse_ring_write_struct(&m->ring, ...);
+}
+
+void dke_mouse_push_button_up(DKE_Mouse_Context *m, DKE_Mouse_ButtonFlags flags) {
+	//~ Dedrick: Push accumulated motion so the click happens after.
+	if (m->x_offset != 0 || m->y_offset != 0 || ...) {
+
+	}
+
+	//~ Dedrick: Push the click.
+	m->buttons_state &= flags;
+	dke_mouse_ring_write_struct(&m->ring, ...);
+}
+
+#if !defined(DKE_MOUSE_MEMSET_OVERRIDE)
+void *dke_mouse_memset_fallback(void *dst, DKE_U8 c, DKE_U32 size) {
+	for (DKE_U32 idx = 0; idx < size; ++idx) {
+		((DKE_U8 *)dst)[idx] = c;
+	}
+	return dst;
+}
+#endif
+
+#if !defined(DKE_MOUSE_MEMCPY_OVERRIDE)
+void *dke_mouse_memcpy_fallback(void *dst, void const *src, DKE_U32 size) {
+	for (DKE_U32 idx = 0; idx < size; ++idx) {
+		((DKE_U8 *)dst)[idx] = ((DKE_U8 *)src)[idx];
+	}
+	return dst;
+}
+#endif
 
 DKE_Mouse_Ring dke_mouse_ring_make(void *memory, DKE_U32 size) {
 	DKE_Mouse_Ring ring = { 0 };
@@ -302,12 +339,39 @@ DKE_Mouse_Ring dke_mouse_ring_make(void *memory, DKE_U32 size) {
 	return ring;
 }
 
-DKE_U32 dke_mouse_ring_write(DKE_Mouse_Ring *ring, void const *src, DKE_U32 size) {
-
+DKE_B32 dke_mouse_ring_try_write(DKE_Mouse_Ring *ring, void const *src, DKE_U32 size) {
+	DKE_B32 result = 0;
+	DKE_U32 const bytes_unconsumed = ring->write_pos - ring->read_pos;
+	DKE_U32 const bytes_available = ring->size - bytes_unconsumed;
+	if (bytes_available >= size) {
+		result = 1;
+		DKE_U32 const ring_offset = ring->write_pos % ring->size;
+		DKE_U32 const bytes_before_split = ring->size - ring_offset;
+		DKE_U32 const pre_split_bytes = dke__mouse_min(bytes_before_split, size);
+		DKE_U32 const pst_split_bytes = size - pre_split_bytes;
+		void const *pre_split_data = src;
+		void const *pst_split_data = (DKE_U8 *)src + pre_split_bytes;
+		dke_mouse_memcpy(ring->memory + ring_offset, pre_split_data, pre_split_bytes);
+		dke_mouse_memcpy(ring->memory, pst_split_data, pst_split_bytes);
+		ring->write_pos += size;
+	}
+	return result;
 }
 
-DKE_U32 dke_mouse_ring_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size) {
-
+DKE_U32 dke_mouse_ring_try_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size) {
+	DKE_B32 result = 0;
+	DKE_U32 const bytes_unconsumed = ring->write_pos - ring->read_pos;
+	if (bytes_available >= size) {
+		result = 1;
+		DKE_U32 const ring_offset = ring->read_pos % ring->size;
+		DKE_U32 const bytes_before_split = ring->size - ring_offset;
+		DKE_U32 const pre_split_bytes = dke__mouse_min(bytes_before_split, size);
+		DKE_U32 const pst_split_bytes = size - pre_split_bytes;
+		dke_mouse_memcpy(dst, ring->memory + ring_offset, pre_split_bytes);
+		dke_mouse_memcpy((DKE_U8 *)dst + pre_split_bytes, ring->memory, pst_split_bytes);
+		ring->read_pos += size;
+	}
+	return result;
 }
 
 #endif // DKE_MOUSE_IMPLEMENTATION
