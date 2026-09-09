@@ -8,7 +8,7 @@ extern "C" {
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Recommended Default Memory Sizes
 //
-// These values are determines from back-of-the-envelope calculations and
+// These values are determined from back-of-the-envelope calculations and
 // real world values. These defaults are derived from common wireless/wired
 // gaming mice, which means it should cover any office mouse. Power users
 // may calculate their own defaults instead.
