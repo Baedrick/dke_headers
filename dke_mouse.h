@@ -478,18 +478,21 @@ void dke_mouse_frame_push_button_up(DKE_Mouse_Frame *frame, DKE_Mouse_ButtonFlag
 }
 
 DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_frame(DKE_Mouse_Frame const *frame) {
-	DKE_U32 const num_snapshot = frame->scratch_pos / sizeof(DKE_Mouse_FrameSnapshot);
-	return (num_snapshot + 1) * sizeof(DKE_Mouse_Report);
+	DKE_U32 const num_snapshots = frame->scratch_pos / sizeof(DKE_Mouse_FrameSnapshot);
+	return (num_snapshots + 1) * sizeof(DKE_Mouse_Report);
 }
 
 void dke_mouse_ring_push_serialized_reports(DKE_Mouse_Ring *ring, DKE_Mouse_SerializedReports const *reports) {
-
+	for (DK_U32 idx = 0; idx < reports->count; ++idx) {
+		DKE_Mouse_Report const *report = &reports->v[idx];
+		dke_mouse_ring_write_struct(ring, report);
+	}
 }
 
 DKE_Mouse_Report dke_mouse_ring_pop_report(DKE_Mouse_Ring *ring) {
 	DKE_Mouse_Report result = { 0 };
 	dke_mouse_ring_read(ring, &result.size, sizeof(DKE_U8));
-	dke_mouse_ring_read(ring, &result.data, sizeof(U8) * result.size);
+	dke_mouse_ring_read(ring, &result.data, result.size);
 	return result;
 }
 
