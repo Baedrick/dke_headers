@@ -30,7 +30,7 @@ extern "C" {
 // A single HID report can only convey up to 32767 counts per axis.
 // Therefore, the minimum reports required:
 //
-//   ceil(640 counts / 32767) = 1 report/frame
+//   ceil(640 counts / 32,767) = 1 report/frame
 //
 // Additional snapshots per frame are needed only when button state
 // changes mid-frame (button barriers) to preserve click order relative
@@ -172,9 +172,6 @@ typedef struct DKE_Mouse_SerializedReports {
 //~ Dedrick: Basic Helpers
 
 //~ Dedrick: Memory Operations
-#if !defined(DKE_MOUSE_MEMSET_OVERRIDE)
-void *dke_mouse_memset_fallback(void *dst, DKE_U8 c, DKE_U32 size);
-#endif
 #if !defined(DKE_MOUSE_MEMCPY_OVERRIDE)
 void *dke_mouse_memcpy_fallback(void *dst, void const *src, DKE_U32 size);
 #endif
@@ -201,6 +198,7 @@ void dke_mouse_frame_push_button_down(DKE_Mouse_Frame *frame, DKE_Mouse_ButtonFl
 void dke_mouse_frame_push_button_up(DKE_Mouse_Frame *frame, DKE_Mouse_ButtonFlags buttons);
 
 DKE_U32 dke_mouse_serialized_reports_memory_size_from_frame(DKE_Mouse_Frame const *frame);
+DKE_Mouse_Report dke_mouse_report_from_config_and_snapshot(DKE_Mouse_Config cfg, DKE_Mouse_FrameSnapshot const *snapshot);
 DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_frame(void *memory, DKE_U32 size, DKE_Mouse_Frame const *frame);
 
 void dke_mouse_ring_push_serialized_reports(DKE_Mouse_Ring *ring, DKE_Mouse_SerializedReports const *frame);
@@ -215,6 +213,7 @@ DKE_Mouse_Report dke_mouse_ring_pop_report(DKE_Mouse_Ring *ring);
 #ifdef DKE_MOUSE_IMPLEMENTATION
 
 #define dke__mouse_assert(x) (void)(x)
+#define dke__mouse_min(a, b) ((a) < (b) ? (a) : (b))
 
 static const DKE_U8 dke__mouse_hid_prefix_descriptor[] = {
 	0x05, 0x01,        // Usage Page (Generic Desktop)
@@ -230,7 +229,7 @@ static const DKE_U8 dke__mouse_hid_axis_descriptor[] = {
 	0x09, 0x31,        //   Usage (Y)
 	0x16, 0x01, 0x80,  //   Logical Minimum (-32767)
 	0x26, 0xFF, 0x7F,  //   Logical Maximum (32767)
-	0x75, 0x08,        //   Report Size (8)
+	0x75, 0x10,        //   Report Size (16)
 	0x95, 0x02,        //   Report Count (2)
 	0x81, 0x06,        //   Input (Data, Var, Rel)
 };
@@ -402,7 +401,7 @@ void dke_mouse_hid_descriptor_fill_from_config(DKE_U8 *dst, DKE_U32 size, DKE_Mo
 }
 
 DKE_Mouse_Frame dke_mouse_frame_make(DKE_Mouse_Config cfg, void *scratch_memory, DKE_U32 scratch_size) {
-	DKE_Mouse_frame frame = { 0 };
+	DKE_Mouse_Frame frame = { 0 };
 	frame.cfg = cfg;
 	frame.scratch_memory = scratch_memory;
 	frame.scratch_size = scratch_size;
@@ -414,7 +413,6 @@ void dke_mouse_frame_reset(DKE_Mouse_Frame *frame) {
 	frame->scratch_pos = 0;
 
 	//~ Dedrick: Reset frame accumulators.
-	frame->buttons_state = 0;
 	frame->x_offset = 0;
 	frame->y_offset = 0;
 	if ((frame->cfg.features & DKE_Mouse_FeatureFlag_Wheel) != 0) {
@@ -447,45 +445,119 @@ static DKE_B32 dke__mouse_frame_has_pending_motion(DKE_Mouse_Frame const *frame)
 	return result;
 }
 
-static void *dke__mouse_scratch_push(DKE_Mouse_Frame *frame, DKE_U32 size) {
+static void *dke__mouse_frame_scratch_push(DKE_Mouse_Frame *frame, DKE_U32 size) {
 	// TODO(Dedrick): Compile switch to assert on out of mem.
-	void *result = 0;
-	if (frame->scratch_pos + size <= frame->scratch_size) {
-		result = frame->scratch_memory + frame->scratch_pos;
-		frame->scratch_pos += size;
-	}
+	dke__mouse_assert(frame->scratch_pos + size <= frame->scratch_size);
+	void *result = frame->scratch_memory + frame->scratch_pos;
+	frame->scratch_pos += size;
 	return result;
 }
 
 static void dke__mouse_frame_place_button_barrier(DKE_Mouse_Frame *frame, DKE_Mouse_ButtonFlags next_buttons_state) {
 	if (frame->buttons_state != next_buttons_state) {
-		//~ Dedrick: Write snapshots up to this point.
-		if (dke__mouse_frame_has_pending_motion(frame)) {
+		// NOTE(Dedrick): Notes on temporal accumulation.
+		// Even on extreme hardware specs of 30,000 DPI and 19m/s flick speed,
+		// the counts/frame evaluates to:
+		//
+		//   750IPS * 35,000DPI / 1,000 frames/sec = 26,250 counts/frame
+		//   ceil(26,250 counts / 32,767) = 1 report/frame
+		//
+		// We still need to accumulate because this library can receive inputs
+		// from software sources which can push a lot more data.
+		do {
+			//~ Dedrick: Load clamped deltas.
+			DKE_S32 const dx = dke__mouse_clamp_s16(frame->x_offset);
+			DKE_S32 const dy = dke__mouse_clamp_s16(frame->y_offset);
+			DKE_S32 const dw = dke__mouse_clamp_s8(frame->wheel);
+			DKE_S32 const dp = dke__mouse_clamp_s8(frame->pan);
 
-		}
+			//~ Dedrick: Write snapshot.
+			DKE_Mouse_FrameSnapshot *snapshot = (DKE_Mouse_FrameSnapshot *)dke__mouse_frame_scratch_push(frame, sizeof(DKE_Mouse_FrameSnapshot));
+			snapshot->buttons_state = frame->buttons_state;
+			snapshot->x_offset = (DKE_S16)dx;
+			snapshot->y_offset = (DKE_S16)dy;
+			snapshot->wheel = (DKE_S8)dw;
+			snapshot->pan = (DKE_S8)dp;
 
-		//~ Dedrick:
+			//~ Dedrick: Update accumulators.
+			frame->x_offset -= dx;
+			frame->y_offset -= dy;
+			frame->wheel -= dw;
+			frame->pan -= dp;
+		} while (dke__mouse_frame_has_pending_motion(frame));
+
+		//~ Dedrick: Set new button state.
 		frame->buttons_state = next_buttons_state;
 	}
 }
 
 void dke_mouse_frame_push_button_down(DKE_Mouse_Frame *frame, DKE_Mouse_ButtonFlags buttons) {
-	dke__mouse_frame_button_barrier(frame, frame->buttons_state | buttons);
+	dke__mouse_frame_place_button_barrier(frame, frame->buttons_state | buttons);
 }
 
 void dke_mouse_frame_push_button_up(DKE_Mouse_Frame *frame, DKE_Mouse_ButtonFlags buttons) {
-	dke__mouse_frame_button_barrier(frame, frame->buttons_state & ~buttons);
+	dke__mouse_frame_place_button_barrier(frame, frame->buttons_state & ~buttons);
 }
 
-DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_frame(DKE_Mouse_Frame const *frame) {
+DKE_U32 dke_mouse_serialized_reports_memory_size_from_frame(DKE_Mouse_Frame const *frame) {
 	DKE_U32 const num_snapshots = frame->scratch_pos / sizeof(DKE_Mouse_FrameSnapshot);
 	return (num_snapshots + 1) * sizeof(DKE_Mouse_Report);
 }
 
+DKE_Mouse_Report dke_mouse_report_from_config_and_snapshot(DKE_Mouse_Config cfg, DKE_Mouse_FrameSnapshot const *snapshot) {
+	DKE_Mouse_Report result = { 0 };
+	DKE_U32 cursor = 0;
+
+	//~ Dedrick: Fill buttons.
+	{
+		DKE_U32 const num_button_bytes = (cfg.num_buttons + 7) / 8;
+		for (DKE_U32 idx = 0; idx < num_button_bytes; ++idx) {
+			result.data[cursor++] = (DKE_U8)((snapshot->buttons_state >> (idx * 8)) & 0xFF);
+		}
+	}
+
+	//~ Dedrick: Fill axes.
+	{
+		result.data[cursor++] = (DKE_U8)(snapshot->x_offset & 0xFF);
+		result.data[cursor++] = (DKE_U8)((snapshot->x_offset >> 8) & 0xFF);
+		result.data[cursor++] = (DKE_U8)(snapshot->y_offset & 0xFF);
+		result.data[cursor++] = (DKE_U8)((snapshot->y_offset >> 8) & 0xFF);
+	}
+
+	//~ Dedrick: Fill wheel if needed.
+	if ((cfg.features & DKE_Mouse_FeatureFlag_Wheel) != 0) {
+		result.data[cursor++] = snapshot->wheel;
+	}
+
+	//~ Dedrick: Fill pan if needed.
+	if ((cfg.features & DKE_Mouse_FeatureFlag_Pan) != 0) {
+		result.data[cursor++] = snapshot->pan;
+	}
+
+	//~ Dedrick: Write size.
+	result.size = cursor;
+
+	return result;
+}
+
+// TODO(Dedrick)
+DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_frame(void *memory, DKE_U32 size, DKE_Mouse_Frame const *frame) {
+
+
+	//~ Dedrick: Fill reports.
+	DKE_Mouse_SerializedReports result = { 0 };
+	{
+		result.v = memory;
+		result.size = report_idx;
+	}
+	return result;
+}
+
 void dke_mouse_ring_push_serialized_reports(DKE_Mouse_Ring *ring, DKE_Mouse_SerializedReports const *reports) {
-	for (DK_U32 idx = 0; idx < reports->count; ++idx) {
+	for (DKE_U32 idx = 0; idx < reports->count; ++idx) {
 		DKE_Mouse_Report const *report = &reports->v[idx];
-		dke_mouse_ring_write_struct(ring, report);
+		dke_mouse_ring_write(ring, &report->size, sizeof(DKE_U8));
+		dke_mouse_ring_write(ring, report->data, report->size);
 	}
 }
 
