@@ -586,7 +586,7 @@ DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_frame(void *memory
 	//~ Dedrick: Fill reports.
 	DKE_Mouse_SerializedReports result = { 0 };
 	{
-		result.v = memory;
+		result.v = reports;
 		result.size = report_idx;
 	}
 	return result;
