@@ -443,11 +443,7 @@ void dke_mouse_frame_push_pan(DKE_Mouse_Frame *frame, DKE_S32 offset) {
 }
 
 static DKE_B32 dke__mouse_frame_has_pending_motion(DKE_Mouse_Frame const *frame) {
-	DKE_B32 result = 0;
-	result |= frame->x_offset != 0;
-	result |= frame->y_offset != 0;
-	result |= frame->wheel != 0;
-	result |= frame->pan != 0;
+	DKE_B32 const result = (frame->x_offset | frame->y_offset | frame->wheel | frame->pan) != 0;
 	return result;
 }
 
