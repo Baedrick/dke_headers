@@ -540,9 +540,48 @@ DKE_Mouse_Report dke_mouse_report_from_config_and_snapshot(DKE_Mouse_Config cfg,
 	return result;
 }
 
-// TODO(Dedrick)
 DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_frame(void *memory, DKE_U32 size, DKE_Mouse_Frame const *frame) {
+	dke__mouse_assert(dke_mouse_serialized_reports_min_memory_size_from_frame(frame) <= size);
 
+	DKE_U32 const num_snapshots = frame->scratch_pos / sizeof(DKE_Mouse_FrameSnapshot);
+	DKE_Mouse_Report *reports = (DKE_Mouse_Report *)memory;
+
+	DKE_U32 report_idx = 0;
+	{
+		DKE_Mouse_FrameSnapshot *snapshots = (DKE_Mouse_FrameSnapshot *)frame->scratch_memory;
+		for (DKE_U32 idx = 0; idx < num_snapshots; ++idx) {
+			reports[report_idx] = dke_mouse_report_from_config_and_snapshot(frame->cfg, &snapshots[idx]);
+			report_idx += 1;
+		}
+	}
+
+	if (num_snapshots == 0 || dke__mouse_frame_has_pending_motion(frame)) {
+		do {
+			//~ Dedrick: Load clamped deltas.
+			DKE_S32 const dx = dke__mouse_clamp_s16(frame->x_offset);
+			DKE_S32 const dy = dke__mouse_clamp_s16(frame->y_offset);
+			DKE_S32 const dw = dke__mouse_clamp_s8(frame->wheel);
+			DKE_S32 const dp = dke__mouse_clamp_s8(frame->pan);
+
+			//~ Dedrick: Write snapshot.
+			DKE_Mouse_FrameSnapshot snapshot = { 0 };
+			snapshot.buttons_state = frame->buttons_state;
+			snapshot.x_offset = (DKE_S16)dx;
+			snapshot.y_offset = (DKE_S16)dy;
+			snapshot.wheel = (DKE_S8)dw;
+			snapshot.pan = (DKE_S8)dp;
+
+			//~ Dedrick: Write report.
+			reports[report_idx] = dke_mouse_report_from_config_and_snapshot(frame->cfg, &snapshot);
+			report_idx += 1;
+
+			//~ Dedrick: Update accumulators.
+			frame->x_offset -= dx;
+			frame->y_offset -= dy;
+			frame->wheel -= dw;
+			frame->pan -= dp;
+		} while (dke__mouse_frame_has_pending_motion(frame));
+	}
 
 	//~ Dedrick: Fill reports.
 	DKE_Mouse_SerializedReports result = { 0 };
