@@ -1,2 +1,2 @@
 # dke_headers
-dke single-file libraries for esp32 in C and C++
+dke single-file libraries for embedded boards in C and C++.
