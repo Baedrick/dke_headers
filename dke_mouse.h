@@ -443,7 +443,7 @@ void dke_mouse_arena_pop_to(DKE_Mouse_Arena *arena, DKE_U32 pos) {
 }
 
 DKE_Mouse_Ring dke_mouse_ring_make(void *memory, DKE_U32 size) {
-	dke_mouse_assert((size & (size - 1)) == 0); // ring size must be power of two.
+	dke_mouse_assert((size & (size - 1)) == 0); // Ring size must be power of two.
 	DKE_Mouse_Ring ring = { 0 };
 	ring.memory = (DKE_U8 *)memory;
 	ring.size = size;
@@ -639,9 +639,11 @@ void dke_mouse_report_chunk_list_push(DKE_Mouse_Arena *arena, DKE_Mouse_ReportCh
 	DKE_Mouse_ReportChunkNode *node = list->last;
 	if (node == 0 || node->count >= node->capacity) {
 		node = dke_mouse_push_array(arena, DKE_Mouse_ReportChunkNode, 1, 4);
+		dke_mouse_assert(node != 0);
 		dke__mouse_sll_queue_push(&list->first, &list->last, node);
 		node->capacity = capacity;
 		node->v = dke_mouse_push_array(arena, DKE_Mouse_Report, node->capacity, 1);
+		dke_mouse_assert(node->v != 0);
 		list->chunk_count += 1;
 	}
 	dke_mouse_memcpy(&node->v[node->count], &report, sizeof(DKE_Mouse_Report));
@@ -653,6 +655,7 @@ DKE_Mouse_ReportArray dke_mouse_report_array_from_chunk_list(DKE_Mouse_Arena *ar
   DKE_Mouse_ReportArray array = { 0 };
   array.count = list->total_count;
   array.v = dke_mouse_push_array(arena, DKE_Mouse_Report, array.count, 1);
+  dke_mouse_assert(array.v != 0);
   DKE_U32 idx = 0;
   for (DKE_Mouse_ReportChunkNode const *node = list->first; node != 0; node = node->next) {
   	dke_mouse_memcpy(array.v + idx, node->v, node->count * sizeof(DKE_Mouse_Report));
