@@ -204,7 +204,7 @@ typedef struct DKE_Mouse_EventPan {
 typedef struct DKE_Mouse_EventButton {
 	DKE_Mouse_EventKind kind;
 	DKE_Mouse_ButtonFlags buttons;
-} DKE_Mouse_EventMove;
+} DKE_Mouse_EventButton;
 
 typedef union DKE_Mouse_Event {
 	DKE_Mouse_EventKind kind;
@@ -227,14 +227,28 @@ typedef struct DKE_Mouse_EventList {
 } DKE_Mouse_EventList;
 
 typedef struct DKE_Mouse_Report {
-	DKE_U8 size; // Max: 4 (buttons) + 4 (axis) + 1 (wheel) + 1 (pan)
+	DKE_U8 size; // Max: 10: 4 (buttons) + 4 (axis) + 1 (wheel) + 1 (pan)
 	DKE_U8 data[15];
 } DKE_Mouse_Report;
 
-typedef struct DKE_Mouse_SerializedReports {
-	DKE_Mouse_Report const *v;
+typedef struct DKE_Mouse_ReportChunkNode {
+	DKE_Mouse_ReportChunkNode *next;
+	DKE_Mouse_Report *v;
 	DKE_U32 count;
-} DKE_Mouse_SerializedReports;
+	DKE_U32 capacity;
+} DKE_Mouse_ReportChunkNode;
+
+typedef struct DKE_Mouse_ReportChunkList {
+	DKE_Mouse_ReportChunkNode *first;
+	DKE_Mouse_ReportChunkNode *last;
+	DKE_U32 chunk_count;
+	DKE_U32 total_count;
+} DKE_Mouse_ReportChunkList;
+
+typedef struct DKE_Mouse_ReportArray {
+	DKE_Mouse_Report *v;
+	DKE_U32 count;
+} DKE_Mouse_ReportArray;
 
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Basic Helpers
@@ -249,14 +263,17 @@ void *dke_mouse_memcpy_fallback(void *dst, void const *src, DKE_U32 size);
 #endif
 
 //~ Dedrick: Memory Primitives
-DKE_Mouse_Arena dke_mouse_arena_make(void *memory, DKE_U32 size);
+DKE_Mouse_Arena *dke_mouse_arena_make(void *memory, DKE_U32 size);
 void *dke_mouse_arena_push(DKE_Mouse_Arena *arena, DKE_U32 size, DKE_U32 align);
+#define dke_mouse_push_array(arena, T, count, align) (T *)dke_mouse_arena_push((arena), (count) * sizeof(T), align)
+
 void dke_mouse_arena_clear(DKE_Mouse_Arena *arena);
 DKE_U32 dke_mouse_arena_pos(DKE_Mouse_Arena *arena);
 void dke_mouse_arena_pop(DKE_Mouse_Arena *arena, DKE_U32 amount);
 void dke_mouse_arena_pop_to(DKE_Mouse_Arena *arena, DKE_U32 pos);
 
 DKE_Mouse_Ring dke_mouse_ring_make(void *memory, DKE_U32 size);
+DKE_B32 dke_mouse_ring_has_items(DKE_Mouse_Ring const *ring);
 DKE_B32 dke_mouse_ring_write(DKE_Mouse_Ring *ring, void const *src, DKE_U32 size);
 DKE_B32 dke_mouse_ring_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size);
 #define dke_mouse_ring_write_struct(ring, ptr) dke_mouse_ring_write((ring), (ptr), sizeof(*(ptr)))
@@ -274,10 +291,14 @@ void dke_mouse_event_list_push_pan(DKE_Mouse_Arena *arena, DKE_Mouse_EventList *
 void dke_mouse_event_list_push_button_down(DKE_Mouse_Arena *arena, DKE_Mouse_EventList *list, DKE_Mouse_ButtonFlags buttons);
 void dke_mouse_event_list_push_button_up(DKE_Mouse_Arena *arena, DKE_Mouse_EventList *list, DKE_Mouse_ButtonFlags buttons);
 
-DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_events(DKE_Mouse_Arena *arena, DKE_Mouse_Spec spec, DKE_Mouse_EventList const *list);
+DKE_Mouse_Report dke_mouse_report_make(DKE_Mouse_Spec spec, DKE_S32 x_offset, DKE_S32 y_offset, DKE_S32 wheel, DKE_S32 pan, DKE_Mouse_ButtonFlags buttons);
+void dke_mouse_report_chunk_list_push(DKE_Mouse_Arena *arena, DKE_Mouse_ReportChunkList *list, DKE_U32 capacity, DKE_Mouse_Report report);
+DKE_Mouse_ReportArray dke_mouse_report_array_from_chunk_list(DKE_Mouse_Arena *arena, DKE_Mouse_ReportChunkList const *list);
 
-void dke_mouse_ring_push_serialized_reports(DKE_Mouse_Ring *ring, DKE_Mouse_SerializedReports const *reports);
-DKE_Mouse_Report dke_mouse_ring_pop_report(DKE_Mouse_Ring *ring);
+DKE_Mouse_ReportArray dke_mouse_report_array_from_event_list(DKE_Mouse_Arena *arena, DKE_Mouse_Spec spec, DKE_Mouse_EventList const *list);
+
+void dke_mouse_ring_serial_push_reports(DKE_Mouse_Ring *ring, DKE_Mouse_ReportArray const *reports);
+DKE_Mouse_Report dke_mouse_ring_serial_pop_report(DKE_Mouse_Ring *ring);
 
 #ifdef __cplusplus
 }
@@ -317,7 +338,7 @@ static const DKE_U8 dke__mouse_hid_button_descriptor[] = {
 	0x81, 0x02,        //   Input (Data, Var, Abs)
 	0x95, 0x00,        //   Report Count (Padding bits) - NOTE(Dedrick): Defined by impl.
 	0x75, 0x01,        //   Report Size (1)
-	0x81, 0x01,        //   Input (Const, Array, Abs)
+	0x81, 0x03,        //   Input (Const, Var, Abs)
 };
 
 static const DKE_U8 dke__mouse_hid_wheel_descriptor[] = {
@@ -345,10 +366,22 @@ static const DKE_U8 dke__mouse_hid_suffix_descriptor[] = {
 	0xC0,              // End Collection (Application)
 };
 
+#define dke__mouse_abs(x) ((x) < 0 ? -(x) : (x))
 #define dke__mouse_min(a, b) ((a) < (b) ? (a) : (b))
 #define dke__mouse_max(a, b) ((a) < (b) ? (b) : (a))
 #define dke__mouse_align_pow2(x, a) (((x) + (a) - 1) & ~((a) - 1))
 #define dke__mouse_clamp(x, a, b) (((x) < (a)) ? (a) : ((x) > (b)) ? (b) : (x))
+
+#define dke__mouse_sll_queue_push(f, l, n) \
+do { \
+	(n)->next = 0; \
+	if (*(f) == 0) { \
+		*(f) = *(l) = (n); \
+	} else { \
+		(*(l))->next = (n); \
+		*(l) = (n); \
+	} \
+} while (0)
 
 #if !defined(DKE_MOUSE_MEMSET_OVERRIDE)
 void *dke_mouse_memset_fallback(void *dst, DKE_U8 c, DKE_U32 size) {
@@ -371,7 +404,7 @@ void *dke_mouse_memcpy_fallback(void *dst, void const *src, DKE_U32 size) {
 DKE_Mouse_Arena *dke_mouse_arena_make(void *memory, DKE_U32 size) {
 	dke_mouse_assert(size >= DKE_MOUSE_ARENA_HEADER_SIZE);
 	DKE_Mouse_Arena *arena = (DKE_Mouse_Arena *)memory;
-	arena->memory = memory;
+	arena->memory = (DKE_U8 *)memory;
 	arena->size = size;
 	arena->pos = DKE_MOUSE_ARENA_HEADER_SIZE;
 	return arena;
@@ -406,14 +439,19 @@ void dke_mouse_arena_pop(DKE_Mouse_Arena *arena, DKE_U32 amount) {
 }
 
 void dke_mouse_arena_pop_to(DKE_Mouse_Arena *arena, DKE_U32 pos) {
-	arena->pos = max(DKE_MOUSE_ARENA_HEADER_SIZE, pos);
+	arena->pos = dke__mouse_max(DKE_MOUSE_ARENA_HEADER_SIZE, pos);
 }
 
 DKE_Mouse_Ring dke_mouse_ring_make(void *memory, DKE_U32 size) {
+	dke_mouse_assert((size & (size - 1)) == 0); // ring size must be power of two.
 	DKE_Mouse_Ring ring = { 0 };
-	ring.memory = memory;
+	ring.memory = (DKE_U8 *)memory;
 	ring.size = size;
 	return ring;
+}
+
+DKE_B32 dke_mouse_ring_has_items(DKE_Mouse_Ring const *ring) {
+	return ring->write_pos - ring->read_pos > 0;
 }
 
 DKE_B32 dke_mouse_ring_write(DKE_Mouse_Ring *ring, void const *src, DKE_U32 size) {
@@ -422,6 +460,7 @@ DKE_B32 dke_mouse_ring_write(DKE_Mouse_Ring *ring, void const *src, DKE_U32 size
 	DKE_U32 const bytes_available = ring->size - bytes_unconsumed;
 	if (bytes_available >= size) {
 		result = 1;
+		dke_mouse_assert(size <= ring->size);
 		DKE_U32 const ring_offset = ring->write_pos % ring->size;
 		DKE_U32 const bytes_before_split = ring->size - ring_offset;
 		DKE_U32 const pre_split_bytes = dke__mouse_min(bytes_before_split, size);
@@ -440,6 +479,7 @@ DKE_B32 dke_mouse_ring_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size) {
 	DKE_U32 const bytes_unconsumed = ring->write_pos - ring->read_pos;
 	if (bytes_unconsumed >= size) {
 		result = 1;
+		dke_mouse_assert(size <= ring->size);
 		DKE_U32 const ring_offset = ring->read_pos % ring->size;
 		DKE_U32 const bytes_before_split = ring->size - ring_offset;
 		DKE_U32 const pre_split_bytes = dke__mouse_min(bytes_before_split, size);
@@ -457,10 +497,10 @@ DKE_U32 dke_mouse_hid_descriptor_size_from_spec(DKE_Mouse_Spec spec) {
 	DKE_U32 size = sizeof(dke__mouse_hid_prefix_descriptor);
 	size += hid_button_descriptor_size;
 	size += sizeof(dke__mouse_hid_axis_descriptor);
-	if ((spec.features & DKE_Mouse_FeatureFlag_Wheel) != 0) {
+	if ((spec.usage & DKE_Mouse_UsageFlag_Wheel) != 0) {
 		size += sizeof(dke__mouse_hid_wheel_descriptor);
 	}
-	if ((spec.features & DKE_Mouse_FeatureFlag_Pan) != 0) {
+	if ((spec.usage & DKE_Mouse_UsageFlag_Pan) != 0) {
 		size += sizeof(dke__mouse_hid_pan_descriptor);
 	}
 	size += sizeof(dke__mouse_hid_suffix_descriptor);
@@ -497,13 +537,13 @@ void dke_mouse_hid_descriptor_fill_from_spec(DKE_U8 *dst, DKE_U32 size, DKE_Mous
 	}
 
 	//~ Dedrick: Fill wheel if needed.
-	if ((spec.features & DKE_Mouse_FeatureFlag_Wheel) != 0) {
+	if ((spec.usage & DKE_Mouse_UsageFlag_Wheel) != 0) {
 		dke_mouse_memcpy(dst + cursor, dke__mouse_hid_wheel_descriptor, sizeof(dke__mouse_hid_wheel_descriptor));
 		cursor += sizeof(dke__mouse_hid_wheel_descriptor);
 	}
 
 	//~ Dedrick: Fill pan if needed.
-	if ((spec.features & DKE_Mouse_FeatureFlag_Pan) != 0) {
+	if ((spec.usage & DKE_Mouse_UsageFlag_Pan) != 0) {
 		dke_mouse_memcpy(dst + cursor, dke__mouse_hid_pan_descriptor, sizeof(dke__mouse_hid_pan_descriptor));
 		cursor += sizeof(dke__mouse_hid_pan_descriptor);
 	}
@@ -516,15 +556,9 @@ void dke_mouse_hid_descriptor_fill_from_spec(DKE_U8 *dst, DKE_U32 size, DKE_Mous
 }
 
 static void dke__mouse_event_list_push(DKE_Mouse_Arena *arena, DKE_Mouse_EventList *list, DKE_Mouse_Event event) {
-	DKE_Mouse_EventNode *node = (DKE_Mouse_EventNode *)dke_mouse_arena_push(arena, sizeof(DKE_Mouse_EventNode), 4);
-	node->next = nullptr;
-	if (list->first == nullptr) {
-		list->first = list->last = node;
-	}
-	else {
-		list->last->next = node;
-		list->last = node;
-	}
+	DKE_Mouse_EventNode *node = dke_mouse_push_array(arena, DKE_Mouse_EventNode, 1, 4);
+	node->v = event;
+	dke__mouse_sll_queue_push(&list->first, &list->last, node);
 	list->node_count += 1;
 }
 
@@ -549,29 +583,93 @@ void dke_mouse_event_list_push_pan(DKE_Mouse_Arena *arena, DKE_Mouse_EventList *
 
 void dke_mouse_event_list_push_button_down(DKE_Mouse_Arena *arena, DKE_Mouse_EventList *list, DKE_Mouse_ButtonFlags buttons) {
 	DKE_Mouse_Event event = { DKE_Mouse_EventKind_ButtonDown };
-	event.move.buttons = buttons;
+	event.button.buttons = buttons;
 	dke__mouse_event_list_push(arena, list, event);
-	list->barrier_count += 1;
 }
 
 void dke_mouse_event_list_push_button_up(DKE_Mouse_Arena *arena, DKE_Mouse_EventList *list, DKE_Mouse_ButtonFlags buttons) {
 	DKE_Mouse_Event event = { DKE_Mouse_EventKind_ButtonUp };
-	event.move.buttons = buttons;
+	event.button.buttons = buttons;
 	dke__mouse_event_list_push(arena, list, event);
-	list->barrier_count += 1;
 }
 
-DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_events(DKE_Mouse_Arena *arena, DKE_Mouse_Spec spec, DKE_Mouse_EventList const *list) {
-	DKE_U32 const max_reports_count = list->barrier_count + 1;
-	DKE_Mouse_Report *reports = (DKE_Mouse_Report *)dke_mouse_arena_push(arena, sizeof(DKE_Mouse_Report) * max_reports_count, 4);
-	DKE_U32 num_reports = 0;
+DKE_Mouse_Report dke_mouse_report_make(DKE_Mouse_Spec spec, DKE_S32 x_offset, DKE_S32 y_offset, DKE_S32 wheel, DKE_S32 pan, DKE_Mouse_ButtonFlags buttons) {
+	// NOTE(Dedrick): Data coming in needs to be clamped.
+	dke_mouse_assert(dke__mouse_abs(x_offset) <= 32767);
+	dke_mouse_assert(dke__mouse_abs(y_offset) <= 32767);
+	dke_mouse_assert(dke__mouse_abs(wheel) <= 127);
+	dke_mouse_assert(dke__mouse_abs(pan) <= 127);
+
+	DKE_Mouse_Report result = { 0 };
+	DKE_U32 cursor = 0;
+
+	//~ Dedrick: Fill buttons.
+	{
+		DKE_U32 const num_button_bytes = (spec.num_buttons + 7) / 8;
+		for (DKE_U32 idx = 0; idx < num_button_bytes; ++idx) {
+			result.data[cursor++] = (DKE_U8)((buttons >> (idx * 8)) & 0xFF);
+		}
+	}
+
+	//~ Dedrick: Fill axes.
+	{
+		result.data[cursor++] = (DKE_U8)(x_offset & 0xFF);
+		result.data[cursor++] = (DKE_U8)((x_offset >> 8) & 0xFF);
+		result.data[cursor++] = (DKE_U8)(y_offset & 0xFF);
+		result.data[cursor++] = (DKE_U8)((y_offset >> 8) & 0xFF);
+	}
+
+	//~ Dedrick: Fill wheel if needed.
+	if ((spec.usage & DKE_Mouse_UsageFlag_Wheel) != 0) {
+		result.data[cursor++] = (DKE_U8)wheel;
+	}
+
+	//~ Dedrick: Fill pan if needed.
+	if ((spec.usage & DKE_Mouse_UsageFlag_Pan) != 0) {
+		result.data[cursor++] = (DKE_U8)pan;
+	}
+
+	//~ Dedrick: Write size.
+	result.size = (DKE_U8)cursor;
+
+	return result;
+}
+
+void dke_mouse_report_chunk_list_push(DKE_Mouse_Arena *arena, DKE_Mouse_ReportChunkList *list, DKE_U32 capacity, DKE_Mouse_Report report) {
+	DKE_Mouse_ReportChunkNode *node = list->last;
+	if (node == 0 || node->count >= node->capacity) {
+		node = dke_mouse_push_array(arena, DKE_Mouse_ReportChunkNode, 1, 4);
+		dke__mouse_sll_queue_push(&list->first, &list->last, node);
+		node->capacity = capacity;
+		node->v = dke_mouse_push_array(arena, DKE_Mouse_Report, node->capacity, 1);
+		list->chunk_count += 1;
+	}
+	dke_mouse_memcpy(&node->v[node->count], &report, sizeof(DKE_Mouse_Report));
+	node->count += 1;
+	list->total_count += 1;
+}
+
+DKE_Mouse_ReportArray dke_mouse_report_array_from_chunk_list(DKE_Mouse_Arena *arena, DKE_Mouse_ReportChunkList const *list) {
+  DKE_Mouse_ReportArray array = { 0 };
+  array.count = list->total_count;
+  array.v = dke_mouse_push_array(arena, DKE_Mouse_Report, array.count, 1);
+  DKE_U32 idx = 0;
+  for (DKE_Mouse_ReportChunkNode const *node = list->first; node != 0; node = node->next) {
+  	dke_mouse_memcpy(array.v + idx, node->v, node->count * sizeof(DKE_Mouse_Report));
+  	idx += node->count;
+  }
+  return array;
+}
+
+DKE_Mouse_ReportArray dke_mouse_report_array_from_event_list(DKE_Mouse_Arena *arena, DKE_Mouse_Spec spec, DKE_Mouse_EventList const *list)  {
+	DKE_Mouse_ReportChunkList reports = { 0 };
 
 	//~ Dedrick: Event stream -> reports.
-	DKE_Mouse_ButtonFlags buttons_state = 0;
 	DKE_S32 x_offset = 0;
 	DKE_S32 y_offset = 0;
 	DKE_S32 wheel = 0;
 	DKE_S32 pan = 0;
+	DKE_Mouse_ButtonFlags buttons_state = 0;
 	for (DKE_Mouse_EventNode const *node = list->first; node != 0; node = node->next) {
 		switch (node->v.kind) {
 			case DKE_Mouse_EventKind_Move: {
@@ -599,97 +697,74 @@ DKE_Mouse_SerializedReports dke_mouse_serialized_reports_from_events(DKE_Mouse_A
 					next_buttons_state &= ~node->v.button.buttons;
 				}
 				if (buttons_state != next_buttons_state) {
-					do {
+					while ((x_offset | y_offset | wheel | pan) != 0) {
 						//~ Dedrick: Load clamped deltas.
 						DKE_S32 const x_offset_clamped = dke__mouse_clamp(x_offset, -32767, 32767);
 						DKE_S32 const y_offset_clamped = dke__mouse_clamp(y_offset, -32767, 32767);
 						DKE_S32 const wheel_clamped = dke__mouse_clamp(wheel, -127, 127);
 						DKE_S32 const pan_clamped = dke__mouse_clamp(pan, -127, 127);
 
-						// TODO(Dedrick): Write report.
-						DKE_Mouse_Report report = { 0 };
+						//~ Dedrick: Write report.
+						DKE_Mouse_Report const report = dke_mouse_report_make(spec, x_offset_clamped, y_offset_clamped, wheel_clamped, pan_clamped, buttons_state);
+						dke_mouse_report_chunk_list_push(arena, &reports, 4, report);
 
 						//~ Dedrick: Update accumulators.
 						x_offset -= x_offset_clamped;
-						y_offset -= x_offset_clamped;
+						y_offset -= y_offset_clamped;
 						wheel -= wheel_clamped;
 						pan -= pan_clamped;
-					} while ((x_offset | y_offset | wheel | pan) != 0);
+					}
 
 					//~ Dedrick: Set new button state.
 					buttons_state = next_buttons_state;
+
+					//~ Dedrick: Push new state.
+					DKE_Mouse_Report const report = dke_mouse_report_make(spec, 0, 0, 0, 0, buttons_state);
+					dke_mouse_report_chunk_list_push(arena, &reports, 4, report);
 				}
 				break;
 			}
 		}
 	}
 
-	//~ Dedrick: Write tail report.
-	if ((x_offset | y_offset | wheel | pan) != 0) {
+	//~ Dedrick: Write tail reports.
+	while ((x_offset | y_offset | wheel | pan) != 0) {
+		//~ Dedrick: Load clamped deltas.
+		DKE_S32 const x_offset_clamped = dke__mouse_clamp(x_offset, -32767, 32767);
+		DKE_S32 const y_offset_clamped = dke__mouse_clamp(y_offset, -32767, 32767);
+		DKE_S32 const wheel_clamped = dke__mouse_clamp(wheel, -127, 127);
+		DKE_S32 const pan_clamped = dke__mouse_clamp(pan, -127, 127);
 
+		//~ Dedrick: Write report.
+		DKE_Mouse_Report const report = dke_mouse_report_make(spec, x_offset_clamped, y_offset_clamped, wheel_clamped, pan_clamped, buttons_state);
+		dke_mouse_report_chunk_list_push(arena, &reports, 4, report);
+
+		//~ Dedrick: Update accumulators.
+		x_offset -= x_offset_clamped;
+		y_offset -= y_offset_clamped;
+		wheel -= wheel_clamped;
+		pan -= pan_clamped;
 	}
 
-	//~ Dedrick: Fill reports and return.
-	DKE_Mouse_SerializedReports result = { 0 };
-	{
-		result.v = reports;
-		result.cout = num_reports;
-	}
-	return result;
+	DKE_Mouse_ReportArray const array = dke_mouse_report_array_from_chunk_list(arena, &reports);
+	return array;
 }
 
-void dke_mouse_ring_push_serialized_reports(DKE_Mouse_Ring *ring, DKE_Mouse_SerializedReports const *reports) {
+void dke_mouse_ring_serial_push_reports(DKE_Mouse_Ring *ring, DKE_Mouse_ReportArray const *reports) {
 	for (DKE_U32 idx = 0; idx < reports->count; ++idx) {
 		DKE_Mouse_Report const *report = &reports->v[idx];
-		dke_mouse_ring_write(ring, &report->size, sizeof(DKE_U8));
+		dke_mouse_ring_write(ring, &report->size, sizeof(report->size));
 		dke_mouse_ring_write(ring, report->data, report->size);
 	}
 }
 
-DKE_Mouse_Report dke_mouse_ring_pop_report(DKE_Mouse_Ring *ring) {
+DKE_Mouse_Report dke_mouse_ring_serial_pop_report(DKE_Mouse_Ring *ring) {
 	DKE_Mouse_Report report = { 0 };
 	dke_mouse_ring_read(ring, &report.size, sizeof(report.size));
-	dke_mouse_ring_read(ring, &report.data, result.size);
-	return result;
+	DKE_B32 const good = dke_mouse_ring_read(ring, &report.data, report.size);
+	dke_mouse_assert(good); // Must succeed.
+	return report;
 }
-
-#if 0
-DKE_Mouse_Report dke_mouse_report_from_config_and_snapshot(DKE_Mouse_Config cfg, DKE_Mouse_FrameSnapshot const *snapshot) {
-	DKE_Mouse_Report result = { 0 };
-	DKE_U32 cursor = 0;
-
-	//~ Dedrick: Fill buttons.
-	{
-		DKE_U32 const num_button_bytes = (cfg.num_buttons + 7) / 8;
-		for (DKE_U32 idx = 0; idx < num_button_bytes; ++idx) {
-			result.data[cursor++] = (DKE_U8)((snapshot->buttons_state >> (idx * 8)) & 0xFF);
-		}
-	}
-
-	//~ Dedrick: Fill axes.
-	{
-		result.data[cursor++] = (DKE_U8)(snapshot->x_offset & 0xFF);
-		result.data[cursor++] = (DKE_U8)((snapshot->x_offset >> 8) & 0xFF);
-		result.data[cursor++] = (DKE_U8)(snapshot->y_offset & 0xFF);
-		result.data[cursor++] = (DKE_U8)((snapshot->y_offset >> 8) & 0xFF);
-	}
-
-	//~ Dedrick: Fill wheel if needed.
-	if ((cfg.features & DKE_Mouse_FeatureFlag_Wheel) != 0) {
-		result.data[cursor++] = snapshot->wheel;
-	}
-
-	//~ Dedrick: Fill pan if needed.
-	if ((cfg.features & DKE_Mouse_FeatureFlag_Pan) != 0) {
-		result.data[cursor++] = snapshot->pan;
-	}
-
-	//~ Dedrick: Write size.
-	result.size = cursor;
-
-	return result;
-}
-#endif
 
 #endif // DKE_MOUSE_IMPLEMENTATION
 
