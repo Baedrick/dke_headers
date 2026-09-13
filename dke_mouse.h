@@ -23,37 +23,51 @@ extern "C" {
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Recommended Default Memory Sizes
 //
-// These values are determined from back-of-the-envelope calculations and
-// real world values. These defaults are derived from common wireless/wired
-// gaming mice, which means it should cover any office mouse. Power users
-// may calculate their own defaults instead.
-//
-// These are the reference specs:
+// Baseline reference hardware specs for derivation:
 // - Polling Rate: 1000Hz (1ms)
 // - Sensor Resolution: 3200DPI
 // - Physical Move Ceiling: 200IPS (~5.08m/s)
 // - USB Report Rate: 1000Hz (1ms)
-// - BLE Rate: 133Hz (7.5ms) / 66.7 Hz (15ms)
+// - BLE Connection Interval: 133Hz (7.5ms) to 66.7 Hz (15ms)
+//
+// These defaults are derived from common wireless/wired gaming mice,
+// whch should cover office mice. Software producers may submit
+// larger bursts and should calculate their own capacities.
 //
 // Peak Movement Load Derivation:
 // The max displacement per frame (1ms @ 1000Hz):
 //
 //   200IPS * 3200DPI = 640,000 counts/sec
 //   640,000 counts/sec / 1,000 frames/sec = 640 counts/frame
-//
-// HID relative axes use signed 16-bit values clamped to [-32767, 32767].
-// A single HID report can only convey up to 32767 counts per axis.
-// Therefore, the minimum reports required:
-//
 //   ceil(640 counts / 32,767) = 1 report/frame
 //
-// Additional snapshots per frame are needed only when button state
-// changes mid-frame (button barriers) to preserve click order relative
-// to motion. 4 snapshots allow up to 3 button transitions per frame.
+// Therefore, at reference hardware limit, one report per frame of
+// computation is sufficient when the HID axis range can represent
+// at least 640 counts.
+//
+// Scratch size (1024 bytes):
+// Supports one bounded frame batch of event-to-report conversion,
+// including the arena header, event nodes, report chunk nodes, and
+// the output report array.
+//
+// Ring buffer sizes:
+// A serialized report is at most 11 bytes (1 size, 10 data). These ring
+// sizes are calculated using the maximum serialized report size. This is
+// intended for a bounded hardware input batch. Software producers
+// submitting larger batches should calculate their own scratch capacity.
+//
+// - USB (256 bytes):
+//     256 bytes / 11 bytes = ~23 reports.
+//     23 reports * 1ms = ~23ms of backlog.
+//
+// - BLE (1024 bytes):
+//     1024 bytes / 11 bytes = ~93 reports.
+//     93 reports * 1ms = ~93ms of backlog.
+//     93ms / 7.5ms = ~12 connection intervals
+//     93ms / 15ms = ~6 connection intervals
 
-#define DKE_MOUSE_DEFAULT_FRAME_SCRATCH_SIZE     (4 * sizeof(DKE_Mouse_FrameSnapshot))
-#define DKE_MOUSE_DEFAULT_REPORTS_PER_FRAME_SIZE (4 * sizeof(DKE_Mouse_Report))
-#define DKE_MOUSE_DEFAULT_RING_SIZE_USB 512
+#define DKE_MOUSE_DEFAULT_SCRATCH_SIZE 1024
+#define DKE_MOUSE_DEFAULT_RING_SIZE_USB 256
 #define DKE_MOUSE_DEFAULT_RING_SIZE_BLE 1024
 
 ////////////////////////////////////////////////////////////
@@ -106,18 +120,20 @@ typedef DKE_S32 DKE_B32;
 
 #define DKE_MOUSE_ARENA_HEADER_SIZE 32
 
-typedef struct DKE_Mouse_Arena {
+typedef struct DKE_Mouse_Arena DKE_Mouse_Arena;
+struct DKE_Mouse_Arena {
 	DKE_U8 *memory;
 	DKE_U32 size;
 	DKE_U32 pos;
-} DKE_Mouse_Arena;
+};
 
-typedef struct DKE_Mouse_Ring {
+typedef struct DKE_Mouse_Ring DKE_Mouse_Ring;
+struct DKE_Mouse_Ring {
 	DKE_U8 *memory;
 	DKE_U32 size;
 	DKE_U32 write_pos;
 	DKE_U32 read_pos;
-} DKE_Mouse_Ring;
+};
 
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Mouse HID Building
@@ -128,10 +144,11 @@ enum {
 	DKE_Mouse_UsageFlag_Pan    = 1 << 1,
 };
 
-typedef struct DKE_Mouse_Spec {
+typedef struct DKE_Mouse_Spec DKE_Mouse_Spec;
+struct DKE_Mouse_Spec {
 	DKE_Mouse_UsageFlags usage;
 	DKE_U8 num_buttons; // Max 32
-} DKE_Mouse_Spec;
+};
 
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Mouse Types
@@ -185,70 +202,82 @@ enum {
 	DKE_Mouse_EventKind_COUNT,
 };
 
-typedef struct DKE_Mouse_EventMove {
+typedef struct DKE_Mouse_EventMove DKE_Mouse_EventMove;
+struct DKE_Mouse_EventMove {
 	DKE_Mouse_EventKind kind;
 	DKE_S32 x_offset;
 	DKE_S32 y_offset;
-} DKE_Mouse_EventMove;
+};
 
-typedef struct DKE_Mouse_EventWheel {
+typedef struct DKE_Mouse_EventWheel DKE_Mouse_EventWheel;
+struct DKE_Mouse_EventWheel {
 	DKE_Mouse_EventKind kind;
 	DKE_S32 offset;
-} DKE_Mouse_EventWheel;
+};
 
-typedef struct DKE_Mouse_EventPan {
+typedef struct DKE_Mouse_EventPan DKE_Mouse_EventPan;
+struct DKE_Mouse_EventPan {
 	DKE_Mouse_EventKind kind;
 	DKE_S32 offset;
-} DKE_Mouse_EventPan;
+};
 
-typedef struct DKE_Mouse_EventButton {
+typedef struct DKE_Mouse_EventButton DKE_Mouse_EventButton;
+struct DKE_Mouse_EventButton {
 	DKE_Mouse_EventKind kind;
 	DKE_Mouse_ButtonFlags buttons;
-} DKE_Mouse_EventButton;
+};
 
-typedef union DKE_Mouse_Event {
+typedef union DKE_Mouse_Event DKE_Mouse_Event;
+union DKE_Mouse_Event {
 	DKE_Mouse_EventKind kind;
 	DKE_Mouse_EventMove move;
 	DKE_Mouse_EventWheel wheel;
 	DKE_Mouse_EventPan pan;
 	DKE_Mouse_EventButton button;
-} DKE_Mouse_Event;
+};
 
-typedef struct DKE_Mouse_EventNode {
+typedef struct DKE_Mouse_EventNode DKE_Mouse_EventNode;
+struct DKE_Mouse_EventNode {
 	DKE_Mouse_EventNode *next;
 	DKE_Mouse_Event v;
-} DKE_Mouse_EventNode;
+};
 
-typedef struct DKE_Mouse_EventList {
+typedef struct DKE_Mouse_EventList DKE_Mouse_EventList;
+struct DKE_Mouse_EventList {
 	DKE_Mouse_EventNode *first;
 	DKE_Mouse_EventNode *last;
 	DKE_U32 node_count;
 	DKE_U32 barrier_count;
-} DKE_Mouse_EventList;
+};
 
-typedef struct DKE_Mouse_Report {
+typedef struct DKE_Mouse_Report DKE_Mouse_Report;
+struct DKE_Mouse_Report {
 	DKE_U8 size; // Max: 10: 4 (buttons) + 4 (axis) + 1 (wheel) + 1 (pan)
-	DKE_U8 data[15];
-} DKE_Mouse_Report;
+	DKE_U8 data[10];
+	DKE_U8 pad[5];
+};
 
-typedef struct DKE_Mouse_ReportChunkNode {
+typedef struct DKE_Mouse_ReportChunkNode DKE_Mouse_ReportChunkNode;
+struct DKE_Mouse_ReportChunkNode {
 	DKE_Mouse_ReportChunkNode *next;
 	DKE_Mouse_Report *v;
 	DKE_U32 count;
 	DKE_U32 capacity;
-} DKE_Mouse_ReportChunkNode;
+};
 
-typedef struct DKE_Mouse_ReportChunkList {
+typedef struct DKE_Mouse_ReportChunkList DKE_Mouse_ReportChunkList;
+struct DKE_Mouse_ReportChunkList {
 	DKE_Mouse_ReportChunkNode *first;
 	DKE_Mouse_ReportChunkNode *last;
 	DKE_U32 chunk_count;
 	DKE_U32 total_count;
-} DKE_Mouse_ReportChunkList;
+};
 
-typedef struct DKE_Mouse_ReportArray {
+typedef struct DKE_Mouse_ReportArray DKE_Mouse_ReportArray;
+struct DKE_Mouse_ReportArray {
 	DKE_Mouse_Report *v;
 	DKE_U32 count;
-} DKE_Mouse_ReportArray;
+};
 
 ////////////////////////////////////////////////////////////
 //~ Dedrick: Basic Helpers
@@ -492,6 +521,7 @@ DKE_B32 dke_mouse_ring_read(DKE_Mouse_Ring *ring, void *dst, DKE_U32 size) {
 }
 
 DKE_U32 dke_mouse_hid_descriptor_size_from_spec(DKE_Mouse_Spec spec) {
+	dke_mouse_assert(spec.num_buttons <= 32);
 	DKE_U8 const num_padding_bits = (8 - (spec.num_buttons % 8)) % 8;
 	DKE_U32 const hid_button_descriptor_size = 16 + (num_padding_bits > 0 ? 6 : 0);
 	DKE_U32 size = sizeof(dke__mouse_hid_prefix_descriptor);
@@ -508,6 +538,7 @@ DKE_U32 dke_mouse_hid_descriptor_size_from_spec(DKE_Mouse_Spec spec) {
 }
 
 void dke_mouse_hid_descriptor_fill_from_spec(DKE_U8 *dst, DKE_U32 size, DKE_Mouse_Spec spec) {
+	dke_mouse_assert(spec.num_buttons <= 32);
 	dke_mouse_assert(dke_mouse_hid_descriptor_size_from_spec(spec) <= size);
 	DKE_U32 cursor = 0;
 
@@ -765,7 +796,7 @@ DKE_Mouse_Report dke_mouse_ring_serial_pop_report(DKE_Mouse_Ring *ring) {
 	DKE_Mouse_Report report = { 0 };
 	dke_mouse_ring_read(ring, &report.size, sizeof(report.size));
 	DKE_B32 const good = dke_mouse_ring_read(ring, &report.data, report.size);
-	dke_mouse_assert(good); // Must succeed.
+	dke_mouse_assert(good); // Data is ill-formed if failed.
 	return report;
 }
 
