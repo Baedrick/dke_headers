@@ -14,8 +14,8 @@ welcomed!
 
 These headers are built to drop right into your projects with minimal footprint
 and zero architectural lock-in. Each library delivers a clean, predictable
-C-style interface designed to solve its core task cleanly, leaving your
-application in total control of its memory, platform I/O, and execution flow.
+C-style interface designed to solve its core task, leaving your application in
+total control of its memory, platform I/O, and execution flow.
 
 Use as much or as little as you need. The libraries never force a framework, an
 RTOS, or rigid assumptions on your codebase. They simply provide reliable, self
