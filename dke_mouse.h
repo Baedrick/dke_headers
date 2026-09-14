@@ -24,49 +24,60 @@ extern "C" {
 //~ Dedrick: Recommended Default Memory Sizes
 //
 // Baseline reference hardware specs for derivation:
-// - Polling Rate: 1000Hz (1ms)
-// - Sensor Resolution: 3200DPI
-// - Physical Move Ceiling: 200IPS (~5.08m/s)
-// - USB Report Rate: 1000Hz (1ms)
-// - BLE Connection Interval: 133Hz (7.5ms) to 66.7 Hz (15ms)
+// - 32-bit platform
+// - Polling Rate: 1000 Hz (1 ms)
+// - Sensor Resolution: 3200 DPI
+// - Physical Move Ceiling: 200 IPS (~5.08 m/s)
+// - USB Report Rate: 1000 Hz (1 ms)
+// - BLE Connection Interval: 133 Hz (7.5 ms) to 66.7 Hz (15 ms)
 //
 // These defaults are derived from common wireless/wired gaming mice,
 // whch should cover office mice. Software producers may submit
 // larger bursts and should calculate their own capacities.
 //
 // Peak Movement Load Derivation:
-// The max displacement per frame (1ms @ 1000Hz):
+// The max displacement per frame (1 ms @ 1000 Hz):
 //
-//   200IPS * 3200DPI = 640,000 counts/sec
+//   200 IPS * 3200 DPI = 640,000 counts/sec
 //   640,000 counts/sec / 1,000 frames/sec = 640 counts/frame
 //   ceil(640 counts / 32,767) = 1 report/frame
 //
-// Therefore, at reference hardware limit, one report per frame of
-// computation is sufficient when the HID axis range can represent
-// at least 640 counts.
+// In this library, the HID descriptor is fixed to use relative axes
+// represented by signed 16-bit values. At the reference hardware limit,
+// one report per frame of computation is sufficient. However, to preserve
+// input sequence, button events are treated as report timeline barriers.
+// Humans cannot click faster than ~50 ms per click, with macros it can go
+// down to 1 ms per button down and up events. Therefore, a reasonable
+// buffer size is 4 clicks per 1 ms frame.
 //
-// Scratch size (1024 bytes):
-// Supports one bounded frame batch of event-to-report conversion,
-// including the arena header, event nodes, report chunk nodes, and
-// the output report array.
+// A frame produces up to 5 events (1 move + 4 button transitions) and
+// generates up to 5 reports across 2 chunks (chunk capacity = 4).
+// Scratch memory required to produce the reports for a frame:
+//
+//   DKE_MOUSE_ARENA_HEADER_SIZE = 32 bytes
+//   5 * sizeof(DKE_Mouse_EventNode) = 80 bytes
+//   2 * sizeof(DKE_Mouse_ReportChunkNode) = 32 bytes
+//   8 * sizeof(DKE_Mouse_Report) = 8 bytes
+//   5 * sizeof(DKE_Mosue_Report) = 80 bytes
+//   Peak required per frame = 352 bytes
+//
+// Hence to give sufficient headroom and alignment we round up to 512 bytes.
 //
 // Ring buffer sizes:
-// A serialized report is at most 11 bytes (1 size, 10 data). These ring
-// sizes are calculated using the maximum serialized report size. This is
-// intended for a bounded hardware input batch. Software producers
-// submitting larger batches should calculate their own scratch capacity.
+// A serialized report is at most 11 bytes (1 size, 10 data). Ring buffers
+// require power of two capacities and must absorb producer bursts when the
+// transport layer lags behind the 1 ms input rate.
 //
-// - USB (256 bytes):
-//     256 bytes / 11 bytes = ~23 reports.
-//     23 reports * 1ms = ~23ms of backlog.
+// - USB (Target ~20 ms backlog):
+//     20 frames * 11 bytes/report = 220 bytes
+//     ceil_pow2(220 bytes) = 256 bytes (~23 reports, ~23 ms backlog)
 //
-// - BLE (1024 bytes):
-//     1024 bytes / 11 bytes = ~93 reports.
-//     93 reports * 1ms = ~93ms of backlog.
-//     93ms / 7.5ms = ~12 connection intervals
-//     93ms / 15ms = ~6 connection intervals
+// - BLE (Target ~6 to 12 connection intervals backlog):
+//     6 intervals * 15 ms = 90 ms backlog
+//     90 frames * 11 bytes/report = 990 bytes
+//     ceil_pow2(990 bytes) = 1024 bytes (~93 reports, ~93 ms backlog)
 
-#define DKE_MOUSE_DEFAULT_SCRATCH_SIZE 1024
+#define DKE_MOUSE_DEFAULT_SCRATCH_SIZE 512
 #define DKE_MOUSE_DEFAULT_RING_SIZE_USB 256
 #define DKE_MOUSE_DEFAULT_RING_SIZE_BLE 1024
 
@@ -130,7 +141,7 @@ struct DKE_Mouse_Arena {
 typedef struct DKE_Mouse_Ring DKE_Mouse_Ring;
 struct DKE_Mouse_Ring {
 	DKE_U8 *memory;
-	DKE_U32 size;
+	DKE_U32 size; // Must be power of two
 	DKE_U32 write_pos;
 	DKE_U32 read_pos;
 };
