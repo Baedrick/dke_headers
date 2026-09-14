@@ -2,9 +2,9 @@
 Various single-file libraries for C and C++ intended for embedded platforms,
 similar to [stb libraries](https://github.com/nothings/stb).
 
-| Library                    | Version | Description                                                  |
-| -------------------------- | ------- | ------------------------------------------------------------ |
-| [dke_mouse.h](dke_mouse.h) | 0.1     | A mouse library where you provide the transport layer        |
+| Library                    | Version | Description                                |
+| -------------------------- | ------- | ------------------------------------------ |
+| [dke_mouse.h](dke_mouse.h) | 0.1     | Transport agnostic mouse library configurable for 1-32 buttons, wheel, and pan |
 
 These libraries are as-is, however, suggestions for improvements or bug fixes
 are appreciated. Please raise an issue before submitting a PR. Bug fixes are
