@@ -57,7 +57,7 @@ extern "C" {
 //   DKE_MOUSE_ARENA_HEADER_SIZE = 32 bytes
 //   5 * sizeof(DKE_Mouse_EventNode) = 80 bytes
 //   2 * sizeof(DKE_Mouse_ReportChunkNode) = 32 bytes
-//   8 * sizeof(DKE_Mouse_Report) = 8 bytes
+//   8 * sizeof(DKE_Mouse_Report) = 128 bytes
 //   5 * sizeof(DKE_Mosue_Report) = 80 bytes
 //   Peak required per frame = 352 bytes
 //
