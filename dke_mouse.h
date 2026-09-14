@@ -258,7 +258,6 @@ struct DKE_Mouse_EventList {
 	DKE_Mouse_EventNode *first;
 	DKE_Mouse_EventNode *last;
 	DKE_U32 node_count;
-	DKE_U32 barrier_count;
 };
 
 typedef struct DKE_Mouse_Report DKE_Mouse_Report;
